@@ -3,6 +3,7 @@ import asyncio
 from tcp import Servidor
 import re
 
+conexoes_clientes = {}
 
 def validar_nome(nome):
     return re.match(br'^[a-zA-Z][a-zA-Z0-9_-]*$', nome) is not None
@@ -12,15 +13,89 @@ def sair(conexao):
     print(conexao, 'conexão fechada')
     conexao.fechar()
 
+def processar_mensagem(conexao, mensagem):
+    """Processa uma única mensagem completa recebida de um cliente."""
+    mensagem = mensagem.strip()
+    if not mensagem:
+        return
+
+    print(f"Processando: {mensagem.decode(errors='ignore')}")
+
+    partes = mensagem.split(b' ', 1)
+    comando = partes[0].upper()
+    
+    # Obtém o estado atual do cliente
+    estado_cliente = conexoes_clientes[conexao]
+    apelido_atual = estado_cliente.get('nick', b'*') # Usa '*' se o nick ainda não foi definido
+
+    if comando == b'PING':
+        payload = partes[1] if len(partes) > 1 else b''
+        conexao.enviar(b':server PONG server :' + payload + b'\r\n')
+    
+    elif comando == b'NICK':
+        if len(partes) < 2:
+            # Cliente enviou "NICK" sem argumento
+            return # IRC real enviaria um erro, mas podemos ignorar por enquanto
+        
+        novo_apelido = partes[1]
+
+        if not validar_nome(novo_apelido):
+            # Apelido inválido
+            resposta = b':server 432 ' + apelido_atual + b' ' + novo_apelido + b' :Erroneous nickname\r\n'
+            conexao.enviar(resposta)
+            return
+        
+        apelido_em_uso = False
+        for c, s in conexoes_clientes.items():
+            if c == conexao: # Ignora o próprio cliente
+                continue
+            # Compara o apelido desejado com os existentes (case-insensitive)
+            if s.get('nick', b'').lower() == novo_apelido.lower():
+                apelido_em_uso = True
+                break
+        
+        if apelido_em_uso:
+            apelido_atual = estado_cliente.get('nick', b'*')
+            resposta = b':server 433 ' + apelido_atual + b' ' + novo_apelido + b' :Nickname is already in use\r\n'
+            conexao.enviar(resposta)
+        else:
+            # 3. Apelido válido e disponível. Realiza o registro ou a troca.
+            apelido_antigo = estado_cliente.get('nick')
+            estado_cliente['nick'] = novo_apelido
+
+            if apelido_antigo is None:
+                # É um registro inicial
+                resposta_001 = b':server 001 ' + novo_apelido + b' :Welcome\r\n'
+                resposta_422 = b':server 422 ' + novo_apelido + b' :MOTD File is missing\r\n'
+                conexao.enviar(resposta_001)
+                conexao.enviar(resposta_422)
+            else:
+                # É uma troca de apelido
+                resposta_troca = b':' + apelido_antigo + b' NICK ' + novo_apelido + b'\r\n'
+                conexao.enviar(resposta_troca)
+                # Nos próximos passos, enviaremos essa notificação para outros usuários também.
 
 def dados_recebidos(conexao, dados):
     if dados == b'':
         return sair(conexao)
-    print(conexao, dados)
 
+    conexao.buffer += dados
+    while b'\r\n' in conexao.buffer:
+        linha, resto = conexao.buffer.split(b'\r\n', 1)
+        conexao.buffer = resto
+        processar_mensagem(conexao, linha)
 
 def conexao_aceita(conexao):
     print(conexao, 'nova conexão')
+    conexao.registrar_recebedor(dados_recebidos)
+
+    # Adiciona a nova conexão ao nosso registro de clientes
+    conexoes_clientes[conexao] = {} # Inicia com um estado vazio
+    
+    # Inicializa o buffer de recebimento para esta conexão
+    conexao.buffer = b''
+    
+    # Registra a função que tratará os dados recebidos
     conexao.registrar_recebedor(dados_recebidos)
 
 
