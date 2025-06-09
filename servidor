@@ -8,7 +8,7 @@ class ServidorIRC:
         self.usuarios = {}
         self.canais = {}
 
-    def iniciar(self, porta=6677):
+    def iniciar(self, porta=6667):
         servidor = Servidor(porta)
         servidor.registrar_monitor_de_conexoes_aceitas(self.conexao_aceita)
         asyncio.get_event_loop().run_forever()
@@ -63,7 +63,7 @@ class ServidorIRC:
 
         while b'\r\n' in estado_usuario['buffer']:
             msg, msg_restante = estado_usuario['buffer'].split(b'\r\n', 1)
-            conexao.buffer = msg_restante
+            estado_usuario['buffer'] = msg_restante
             self.processar_comando(conexao, msg)
 
     def conexao_aceita(self, conexao):
@@ -80,7 +80,7 @@ class ServidorIRC:
 
         partes = mensagem.split(b' ', 1)
         comando = partes[0].upper()
-        args = partes[1:] if len(partes) > 1 else b''
+        args = partes[1] if len(partes) > 1 else b''
         estado_cliente = self.usuarios[conexao]
         nick_cliente = estado_cliente.get('nick')
 
@@ -123,7 +123,7 @@ class ServidorIRC:
             
         conexao_usuario = self.conexao_por_nick(novo_nick)
         if conexao_usuario and conexao_usuario != conexao:
-            conexao.enviar = b':server 433 ' + nick_atual + b' ' + novo_nick + b' :Nickname is already in use\r\n'
+            conexao.enviar(b':server 433 ' + nick_atual + b' ' + novo_nick + b' :Nickname is already in use\r\n')
         else: 
             estado_usuario['nick'] = novo_nick
             if nick_atual == b'*':
@@ -134,28 +134,27 @@ class ServidorIRC:
 
     #Passo 5: Implentação do comando PRIVMSG
     def privmsg(self, conexao, args):       
-        remetente = self.usuarios[conexao]['nick']
-        if b':' not in args: return 
+        remetente = self.usuarios[conexao].get('nick')
+        if b' :' not in args: return 
 
-        destinatario, conteudo = args.split(b':', 1)
+        destinatario, conteudo = args.split(b' :', 1)
+        msg = b':' + remetente + b' PRIVMSG ' + destinatario + b' :' + conteudo + b'\r\n'
         if destinatario.startswith(b'#'):
-            canal = destinatario.lower()
-            if canal in self.canais and conexao in self.canais[canal]:
-                msg = b':' + remetente + b' PRIVMSG ' + destinatario + b' :' + conteudo + b'\r\n'
-                for membro in self.canais[canal]:
+            canal_lwr = destinatario.lower()
+            if canal_lwr in self.canais and conexao in self.canais[canal_lwr]:    
+                for membro in self.canais[canal_lwr]:
                     if membro != conexao: 
                         membro.enviar(msg)
-            else:
-                conexao_destinatario = self.conexao_por_nick(destinatario)
-                if conexao_destinatario:
-                    msg = b':' + remetente + b' PRIVMSG ' + destinatario + b' :' + conteudo + b'\r\n'
-                    conexao_destinatario.enviar(msg)
+        else:
+            conexao_destinatario = self.conexao_por_nick(destinatario)
+            if conexao_destinatario:
+                conexao_destinatario.enviar(msg)
 
     #Passo 6: Implentação do comando JOIN
     #Passo 9: Envia lista de membros do canal
     def join(self, conexao, args):
         remetente = self.usuarios[conexao]['nick']
-        canal = args
+        canal = args.split(b' ')[0]
 
         if not canal.startswith(b'#') or not self.validar_nome(canal[1:]):
             conexao.enviar(b':server 403 ' + canal + b' :No such channel\r\n')
@@ -170,7 +169,7 @@ class ServidorIRC:
             self.canais[canal_lwr].append(conexao)
             msg_join = b':' + remetente + b' JOIN :' + canal + b'\r\n'
             for membro in self.canais[canal_lwr]:
-                    membro.enviar(msg_join)
+                membro.enviar(msg_join)
 
         # Envia a lista de membros
         membros = sorted([self.usuarios[c]['nick'] for c in self.canais[canal_lwr] if c in self.usuarios and 'nick' in self.usuarios[c]])
@@ -181,7 +180,7 @@ class ServidorIRC:
     #Passo 7: Implentação do comando PART
     def part(self, conexao, args):    
         remetente = self.usuarios[conexao]['nick']           
-        canal = args
+        canal = args.split(b' ')[0]
         canal_lwr = canal.lower()
             
         if canal_lwr in self.canais and conexao in self.canais[canal_lwr]:
